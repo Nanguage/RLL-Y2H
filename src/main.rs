@@ -4,6 +4,11 @@ use std::str;
 use std::collections::HashMap;
 use std::mem;
 use std::fmt;
+use std::thread;
+use std::sync::mpsc;
+use std::sync::{Mutex, Arc};
+use std::time::Duration;
+
 
 extern crate bio;
 extern crate clap;
@@ -65,15 +70,15 @@ fn recover_seq(code: u64, k: u8) -> String {
 }
 
 
-enum ExtractRes<'a> {
-    Ok(&'a [u8], &'a [u8]),
+enum ExtractRes {
+    Ok(String, String),
     ScoreTooLow,
     LeftTooShort,
     RightTooShort,
 }
 
 
-fn extract_pet<'a>(seq: &'a [u8], pattern: &[u8], flanking: u8) -> (ExtractRes<'a>, Alignment) {
+fn extract_pet(seq: &[u8], pattern: &[u8], flanking: u8) -> (ExtractRes, Alignment) {
     // align linker to read
     let score = |a: u8, b: u8| if a == b {1i32} else {-1i32};
     let mut aligner = Aligner::with_capacity(seq.len(), pattern.len(), -1, -1, score);
@@ -88,12 +93,12 @@ fn extract_pet<'a>(seq: &'a [u8], pattern: &[u8], flanking: u8) -> (ExtractRes<'
         return (ExtractRes::LeftTooShort, alignment)
     }
     let s = alignment.ystart - flanking as usize;
-    let left = &seq[s..alignment.ystart];
+    let left = String::from_utf8(seq[s..alignment.ystart].to_vec()).unwrap();
     let e = alignment.yend + flanking as usize;
     if e > alignment.ylen {
         return (ExtractRes::RightTooShort, alignment)
     }
-    let right = &seq[alignment.yend..e];
+    let right = String::from_utf8(seq[alignment.yend..e].to_vec()).unwrap();
 
     (ExtractRes::Ok(left, right), alignment)
 }
@@ -187,6 +192,11 @@ fn main() {
              .long("detail")
              .takes_value(true)
              .help("Output the align detail."))
+        .arg(Arg::with_name("threads")
+             .short("t")
+             .long("threads")
+             .takes_value(true)
+             .help("Number of threads used for processing reads."))
         .get_matches();
 
     let fq_path = matches.value_of("fq").unwrap();
@@ -195,6 +205,8 @@ fn main() {
     let enzyme = matches.value_of("enzyme").unwrap_or("GTTGGA");
     let flanking = matches.value_of("flanking").unwrap_or("13");
     let flanking: u8 = flanking.parse().unwrap();
+    let threads = matches.value_of("threads").unwrap_or("1");
+    let threads: u8 = threads.parse().unwrap();
 
     let mut detail_file = match matches.value_of("align_detail") {
         Some(p) => Some(File::create(p).unwrap()),
@@ -204,7 +216,7 @@ fn main() {
     let fq_file = File::open(fq_path).unwrap();
     let fq = fastq::Reader::new(fq_file);
     let mut out_file = File::create(out_path).unwrap();
-    let mut records = fq.records();
+    let records = fq.records();
 
     let mut freq: HashMap<(u64, u64), u64> = HashMap::new();
 
@@ -222,50 +234,86 @@ fn main() {
     );
 
     let mut counter = ResCounter::new();
+    let records = Arc::new(Mutex::new(records));
+    let patterns = Arc::new(patterns);
+    let mut handles = vec![];
+    let (tx, rx) = mpsc::channel();
+
+    info!("Run with {} threads.", threads);
+
+    for _ in 0..threads {
+        let records = Arc::clone(&records);
+        let patterns = Arc::clone(&patterns);
+        let tx1 = mpsc::Sender::clone(&tx);
+
+        let handle = thread::spawn(move || {
+            loop {
+                // read seq from fq file
+                let rec = {
+                    let mut records = records.lock().unwrap();
+                    match records.next() {
+                        Some(r) => match r {
+                            Ok(r_) => r_,
+                            Err(e) => panic!("{:?}", e),
+                        },
+                        None => break
+                    }
+                };
+                let seq = String::from_utf8(rec.seq().to_vec()).unwrap();
+
+                let mut align_res: Vec<(ExtractRes, Alignment)> = Vec::with_capacity(2);
+                for pattern in patterns.iter() {
+                    align_res.push(extract_pet(seq.as_bytes(), &pattern, flanking));
+                    let res = &align_res[align_res.len()-1].0;
+                    match res {
+                        ExtractRes::Ok(_, _) => {
+                            break
+                        },
+                        _ => {
+                            continue    
+                        },
+                    }
+                }
+                let rec_id = String::from(rec.id());
+                tx1.send((align_res, rec_id)).unwrap();
+            }
+        });
+        handles.push(handle);
+    }
 
     loop {
-        // read seq from fq file
-        let rec = match records.next() {
-            Some(r) => match r {
-                Ok(r_) => r_,
-                Err(e) => panic!("{:?}", e),
-            },
-            None => break
-        };
-        let vec = rec.seq();
-        let seq = &vec[..(vec.len()-1)];
+        match rx.recv_timeout(Duration::from_millis(400)) {
+            Ok((align_res, rec_id)) => {
+                let res = &align_res[align_res.len()-1];
+                let alignment = &res.1;
+                if let Some(mut f) = detail_file {
+                    // write align detail
+                    let _ = writeln!(f,
+                        "{}\t{}\t{}\t{}\t{}",
+                        rec_id, align_res.len(),
+                        alignment.score, alignment.ystart, alignment.yend,
+                    );
+                    detail_file = Some(f);
+                }
 
-        let mut align_res: Vec<(ExtractRes, Alignment)> = Vec::with_capacity(2);
-        for pattern in patterns.iter() {
-            align_res.push(extract_pet(seq, &pattern, flanking));
-            let res = &align_res[align_res.len()-1].0;
-            match res {
-                ExtractRes::Ok(left, right) => {
-                    // count left-right pair
-                    let mut key: (u64, u64) = (compress_seq(left).unwrap(), compress_seq(right).unwrap());
+                // count left-right pair
+                if let ExtractRes::Ok(left, right) = &res.0 {
+                    let mut key: (u64, u64) = (compress_seq(left.as_bytes()).unwrap(),
+                                               compress_seq(right.as_bytes()).unwrap());
                     if key.0 > key.1 { mem::swap(&mut key.0, &mut key.1) };
                     *freq.entry(key).or_insert(0) += 1;
-                    break
-                },
-                _ => {
-                    continue    
-                },
+                }
+                counter.count(&res.0);
+            },
+            _ => {
+                info!("End processing.");
+                break;
             }
         }
-        let alignment = &align_res[align_res.len()-1].1;
+    }
 
-        if let Some(mut f) = detail_file {
-            // write align detail
-            let _ = writeln!(f,
-                "{}\t{}\t{}\t{}\t{}",
-                rec.id(), align_res.len(),
-                alignment.score, alignment.ystart, alignment.yend,
-            );
-            detail_file = Some(f);
-        }
-
-        // count
-        counter.count(&align_res[align_res.len()-1].0)
+    for handle in handles {  // wait all threads fishish
+        handle.join().unwrap();
     }
 
     for (k, v) in freq {
