@@ -8,10 +8,14 @@ use std::thread;
 use std::sync::mpsc;
 use std::sync::{Mutex, Arc};
 use std::time::Duration;
+use std::io::Read;
+use std::collections::HashSet;
 
 
 extern crate bio;
 extern crate clap;
+extern crate flate2;
+extern crate log;
 extern crate simple_logger;
 
 use clap::{Arg, App};
@@ -20,6 +24,7 @@ use bio::alignment::Alignment;
 use bio::io::fastq;
 use bio::alphabets::dna::revcomp;
 use log::{info};
+use flate2::read::GzDecoder;
 
 
 const SEQ_NT4_TABLE: [u64; 256] = [
@@ -78,14 +83,14 @@ enum ExtractRes {
 }
 
 
-fn extract_pet(seq: &[u8], pattern: &[u8], flanking: u8) -> (ExtractRes, Alignment) {
+fn extract_pet(seq: &[u8], pattern: &[u8], flanking: u8, score_ratio_thresh: f32) -> (ExtractRes, Alignment) {
     // align linker to read
     let score = |a: u8, b: u8| if a == b {1i32} else {-1i32};
     let mut aligner = Aligner::with_capacity(seq.len(), pattern.len(), -1, -1, score);
     let alignment = aligner.semiglobal(pattern, seq);
 
     // filter out non matched reads
-    if (alignment.score as f32) < pattern.len() as f32 * 0.6 { 
+    if (alignment.score as f32) < pattern.len() as f32 * score_ratio_thresh { 
         return (ExtractRes::ScoreTooLow, alignment)
     }
     // filter out incomplete flanking
@@ -176,17 +181,22 @@ fn main() {
              .takes_value(true)
              .help("Enzyme recognize site.")
             )
-        .arg(Arg::with_name("output")
+        .arg(Arg::with_name("output_prefix")
              .short("o")
-             .long("output")
+             .long("output_prefix")
              .required(true)
              .takes_value(true)
-             .help("Output tsv file."))
+             .help("Prefix of output files."))
         .arg(Arg::with_name("flanking")
              .short("f")
              .long("flanking")
              .takes_value(true)
              .help("Flanking length."))
+        .arg(Arg::with_name("score_ratio_thresh")
+             .short("s")
+             .long("score_ratio_thresh")
+             .takes_value(true)
+             .help("Threshold of (align score / pattern length)"))
         .arg(Arg::with_name("align_detail")
              .short("d")
              .long("detail")
@@ -197,25 +207,36 @@ fn main() {
              .long("threads")
              .takes_value(true)
              .help("Number of threads used for processing reads."))
+        .arg(Arg::with_name("wait_timeout")
+             .long("wait_timeout")
+             .takes_value(true)
+             .help("Wait time for end channel timeout."))
         .get_matches();
 
     let fq_path = matches.value_of("fq").unwrap();
-    let out_path = matches.value_of("output").unwrap();
+    let out_prefix = matches.value_of("output_prefix").unwrap();
     let linker = matches.value_of("linker").unwrap();
     let enzyme = matches.value_of("enzyme").unwrap_or("GTTGGA");
     let flanking = matches.value_of("flanking").unwrap_or("13");
     let flanking: u8 = flanking.parse().unwrap();
+    let score_ratio_thresh = matches.value_of("score_ratio_thresh").unwrap_or("0.6");
+    let score_ratio_thresh: f32 = score_ratio_thresh.parse().unwrap();
     let threads = matches.value_of("threads").unwrap_or("1");
     let threads: u8 = threads.parse().unwrap();
+    let wait_t = matches.value_of("wait_timeout").unwrap_or("500");
+    let wait_t: u64 = wait_t.parse().unwrap();
 
     let mut detail_file = match matches.value_of("align_detail") {
         Some(p) => Some(File::create(p).unwrap()),
         None => None,
     };
 
-    let fq_file = File::open(fq_path).unwrap();
+    let fq_file: Box<dyn Read + Send + Sync> = if fq_path.ends_with(".gz") {
+        Box::new(GzDecoder::new(File::open(fq_path).unwrap()))
+    } else {
+        Box::new(File::open(fq_path).unwrap())
+    };
     let fq = fastq::Reader::new(fq_file);
-    let mut out_file = File::create(out_path).unwrap();
     let records = fq.records();
 
     let mut freq: HashMap<(u64, u64), u64> = HashMap::new();
@@ -263,7 +284,7 @@ fn main() {
 
                 let mut align_res: Vec<(ExtractRes, Alignment)> = Vec::with_capacity(2);
                 for pattern in patterns.iter() {
-                    align_res.push(extract_pet(seq.as_bytes(), &pattern, flanking));
+                    align_res.push(extract_pet(seq.as_bytes(), &pattern, flanking, score_ratio_thresh));
                     let res = &align_res[align_res.len()-1].0;
                     match res {
                         ExtractRes::Ok(_, _) => {
@@ -282,7 +303,7 @@ fn main() {
     }
 
     loop {
-        match rx.recv_timeout(Duration::from_millis(400)) {
+        match rx.recv_timeout(Duration::from_millis(wait_t)) {
             Ok((align_res, rec_id)) => {
                 let res = &align_res[align_res.len()-1];
                 let alignment = &res.1;
@@ -316,10 +337,39 @@ fn main() {
         handle.join().unwrap();
     }
 
-    for (k, v) in freq {
-        let seq1 = recover_seq(k.0, flanking);
-        let seq2 = recover_seq(k.1, flanking);
-        let _ = writeln!(out_file, "{}\t{}\t{}", seq1, seq2, v);
+    let cnt_path = format!("{}.cnt", out_prefix);
+    let fq_out_path = format!("{}.cnt.fq", out_prefix);
+    let mut cnt_file = File::create(cnt_path.clone()).unwrap();
+    let fq_out_file = File::create(fq_out_path.clone()).unwrap();
+    let mut fq_out = fastq::Writer::new(fq_out_file);
+
+    let mut key_set = HashSet::new();
+    let mut kv_vec = vec![];
+    for (k, v) in &freq {
+        key_set.insert(k.0);
+        key_set.insert(k.1);
+        kv_vec.push((k.0, k.1, v));
+    }
+    info!("Totally {} kinds of pairs and {} kinds of sequences were founded.", freq.len(), key_set.len());
+    kv_vec.sort_by(|a, b| b.2.cmp(a.2));
+    info!("Write pair counts to tsv file: {}", cnt_path);
+    for (k0, k1, v) in kv_vec {
+        let _ = writeln!(cnt_file, "{}\t{}\t{}", k0, k1, v);
+    }
+
+    info!("Write sequences to fastq file: {}", fq_out_path);
+    let mut key_vec = key_set.into_iter().collect::<Vec<u64>>();
+    key_vec.sort();
+    for k in key_vec {
+        let seq = recover_seq(k, flanking);
+        let id = format!("{}", k);
+        let qual = vec![b'I'; seq.len()];
+        let _ = fq_out.write(
+            &id,
+            Option::None,
+            seq.as_bytes(),
+            &qual,
+        );
     }
 
     info!("{}", counter);
