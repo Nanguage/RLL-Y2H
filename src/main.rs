@@ -65,7 +65,7 @@ fn compress_seq(seq: &[u8]) -> Result<u64, &str> {
 
 fn recover_seq(code: u64, k: u8) -> String {
     let mut chars: Vec<u8> = Vec::with_capacity(k as usize);
-    for i in 0..(k-1) {
+    for i in 0..k {
         let mask: u64 = 3 << (i*2);
         let idx = (code & mask) >> (i*2);
         let b = IDX_TABLE[idx as usize];
