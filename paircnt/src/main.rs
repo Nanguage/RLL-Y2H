@@ -52,14 +52,17 @@ const IDX_TABLE: [u8; 4] = [
 
 fn compress_seq(seq: &[u8]) -> Result<u64, &str> {
     let mut res: u64 = 0;
-    let mut mask: u64;
+    let mut res_rc: u64 = 0;
+    let end = seq.len() - 1;
     for i in 0..seq.len() {
         if i >= 32 {
             return Err("Seq can't longer than 32.")
         }
-        mask = SEQ_NT4_TABLE[seq[i] as usize] << i*2;
-        res |= mask;
+        let m = SEQ_NT4_TABLE[seq[i] as usize];
+        res |= m << i*2;
+        res_rc |= (3 - m) << (end - i)*2;
     }
+    if res > res_rc { mem::swap(&mut res, &mut res_rc) };
     Ok(res)
 }
 
@@ -363,7 +366,7 @@ fn main() {
     for k in key_vec {
         let seq = recover_seq(k, flanking);
         let id = format!("{}", k);
-        let qual = vec![b'I'; seq.len()];
+        let qual = vec![b'~'; seq.len()];
         let _ = fq_out.write(
             &id,
             Option::None,

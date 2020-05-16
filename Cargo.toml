@@ -1,12 +1,3 @@
-[package]
-name = "paircnt"
-version = "0.1.0"
-authors = ["nanguage <nanguage@yahoo.com>"]
-edition = "2018"
+[workspace]
 
-[dependencies]
-bio = "*"
-clap = "2.33.0"
-log = "0.4"
-simple_logger = "1.6.0"
-flate2 = "1.0.14"
+members = [ "paircnt", "getedges" ]
