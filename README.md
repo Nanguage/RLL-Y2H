@@ -91,3 +91,11 @@ More usage detail see:
 ```bash
 ./getedges -h
 ```
+
+## About RLL-Y2H
+More detail about RLL-Y2H please see the original paper:
+
+```
+Yang, Fang, et al. "Development and application of a recombination-based library versus library high-throughput yeast two-hybrid (RLL-Y2H) screening system." Nucleic acids research 46.3 (2018): e17-e17.
+```
+
