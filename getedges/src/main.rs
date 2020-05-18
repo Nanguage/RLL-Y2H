@@ -217,7 +217,7 @@ fn main() {
     let path_sam = matches.value_of("sam").unwrap();
     let path_out = matches.value_of("output").unwrap();
     let th_mapq: u8 = matches.value_of("th_mapq").unwrap_or("0").parse().unwrap();
-    let th_mismatch: u8 = matches.value_of("th_mismatch").unwrap_or("1").parse().unwrap();
+    let th_mismatch: u8 = matches.value_of("th_mismatch").unwrap_or("0").parse().unwrap();
     let th_aligned: u8 = matches.value_of("th_aligned").unwrap_or("1").parse().unwrap();
     let mut detail_file = match matches.value_of("detail") {
         Some(p) => Some(File::create(p).unwrap()),

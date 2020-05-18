@@ -167,7 +167,7 @@ total reads: {}\n",
 fn main() {
     simple_logger::init().unwrap();
 
-    let matches = App::new("PET Extract")
+    let matches = App::new("Extract and counting seq pairs.")
         .arg(Arg::with_name("fq")
              .required(true)
              .help("Fastq file of reads 1."))
