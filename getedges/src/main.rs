@@ -114,19 +114,24 @@ fn load_sam(path: &str, th_mapq: u8, th_mismatch: u8, th_aligned: u8) -> HashMap
 
 
 struct ResCounter {
-    n_valid_pair: u64,
-    n_prey_nv_pair: u64,
-    n_bait_nv_pair: u64,
-    n_nv_pair: u64,
+    // Count for pair numbers and total reads
+    n_valid_pair: (u64, u64),
+    n_prey_nv_pair: (u64, u64),
+    n_bait_nv_pair: (u64, u64),
+    n_nv_pair: (u64, u64),
+    n_bait_bait: (u64, u64),
+    n_prey_prey: (u64, u64),
 }
 
 impl<'a> ResCounter {
     fn new() -> Self {
         Self {
-            n_valid_pair: 0,
-            n_prey_nv_pair: 0,
-            n_bait_nv_pair: 0,
-            n_nv_pair: 0,
+            n_valid_pair: (0, 0),
+            n_prey_nv_pair: (0, 0),
+            n_bait_nv_pair: (0, 0),
+            n_nv_pair: (0, 0),
+            n_bait_bait: (0, 0),
+            n_prey_prey: (0, 0),
         }
     }
 
@@ -136,18 +141,29 @@ impl<'a> ResCounter {
         match (node1, node2) {
             (Node::Prey(p_name), Node::Bait(b_name)) | (Node::Bait(b_name), Node::Prey(p_name)) => {
                 *bait_prey_cnt.entry((b_name, p_name)).or_insert(0) += cnt;
-                self.n_valid_pair += 1;
+                self.n_valid_pair.0 += 1;
+                self.n_valid_pair.1 += cnt;
             },
             (Node::Prey(_), Node::NotValid(_)) | (Node::NotValid(_), Node::Prey(_)) => {
-                self.n_prey_nv_pair += 1;
+                self.n_prey_nv_pair.0 += 1;
+                self.n_prey_nv_pair.1 += cnt;
             },
             (Node::Bait(_), Node::NotValid(_)) | (Node::NotValid(_), Node::Bait(_)) => {
-                self.n_bait_nv_pair += 1;
+                self.n_bait_nv_pair.0 += 1;
+                self.n_bait_nv_pair.1 += cnt;
             },
             (Node::NotValid(_), Node::NotValid(_)) => {
-                self.n_nv_pair += 1;
+                self.n_nv_pair.0 += 1;
+                self.n_nv_pair.1 += cnt;
             },
-            _ => {}
+            (Node::Bait(_), Node::Bait(_)) => {
+                self.n_bait_bait.0 += 1;
+                self.n_bait_bait.1 += cnt;
+            },
+            (Node::Prey(_), Node::Prey(_)) => {
+                self.n_prey_prey.0 += 1;
+                self.n_prey_prey.1 += cnt;
+            }
         }
     }
 }
@@ -155,24 +171,39 @@ impl<'a> ResCounter {
 impl fmt::Display for ResCounter {
 
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let total = self.n_valid_pair + self.n_bait_nv_pair +
-                    self.n_prey_nv_pair + self.n_nv_pair;
-        let ratio = |c| {
+        let total_pairs = self.n_valid_pair.0 + self.n_bait_nv_pair.0 +
+                          self.n_prey_nv_pair.0 + self.n_nv_pair.0 +
+                          self.n_bait_bait.0 + self.n_bait_bait.1;
+        let total_reads = self.n_valid_pair.1 + self.n_bait_nv_pair.1 +
+                          self.n_prey_nv_pair.1 + self.n_nv_pair.1 +
+                          self.n_bait_bait.1 + self.n_prey_prey.1;
+        let ratio = |c, total| {
             if total == 0 { return format!("0%"); }
             format!("{:.2}%", ((c*100) as f64) / (total as f64))
         };
         write!(f,
             "Count result:
-    Bait-Prey\t{}\t{}
-    Bait-NotValid\t{}\t{}
-    Prey-NotValid\t{}\t{}
-    NotValid-NotValid\t{}\t{}
-total pairs: {}\n",
-            self.n_valid_pair, ratio(self.n_valid_pair),
-            self.n_bait_nv_pair, ratio(self.n_bait_nv_pair),
-            self.n_prey_nv_pair, ratio(self.n_prey_nv_pair),
-            self.n_nv_pair, ratio(self.n_nv_pair),
-            total,
+    Bait-Prey\t{}\t{}\t{}\t{}
+    Bait-Bait\t{}\t{}\t{}\t{}
+    Prey-Prey\t{}\t{}\t{}\t{}
+    Bait-NotValid\t{}\t{}\t{}\t{}
+    Prey-NotValid\t{}\t{}\t{}\t{}
+    NotValid-NotValid\t{}\t{}\t{}\t{}
+total pairs: {}
+total reads: {}\n",
+            self.n_valid_pair.0, ratio(self.n_valid_pair.0, total_pairs),
+            self.n_valid_pair.1, ratio(self.n_valid_pair.1, total_reads),
+            self.n_bait_bait.0, ratio(self.n_bait_bait.0, total_pairs),
+            self.n_bait_bait.1, ratio(self.n_bait_bait.1, total_reads),
+            self.n_prey_prey.0, ratio(self.n_prey_prey.0, total_pairs),
+            self.n_prey_prey.1, ratio(self.n_prey_prey.1, total_reads),
+            self.n_bait_nv_pair.0, ratio(self.n_bait_nv_pair.0, total_pairs),
+            self.n_bait_nv_pair.1, ratio(self.n_bait_nv_pair.1, total_reads),
+            self.n_prey_nv_pair.0, ratio(self.n_prey_nv_pair.0, total_pairs),
+            self.n_prey_nv_pair.1, ratio(self.n_prey_nv_pair.1, total_reads),
+            self.n_nv_pair.0, ratio(self.n_nv_pair.0, total_pairs),
+            self.n_nv_pair.1, ratio(self.n_nv_pair.1, total_reads),
+            total_pairs, total_reads
         )
     }
 
